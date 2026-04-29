@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/usr/bin/env bash
 # ==============================================================================
 # setup.sh - One-stop setup for the MCP Jira/Wiki server in VS Code
 #
@@ -6,9 +6,84 @@
 #           sh /path/to/this/setup.sh
 #         Or download and run directly:
 #           sh setup.sh
+#
+#         Default behavior:
+#           - Writes MCP config to global VS Code user path on Linux:
+#             ~/.config/Code/User/mcp.json
+#
+#         Optional:
+#           sh setup.sh --workspace-only
+#           - Writes MCP config only to:
+#             <repo>/.vscode/mcp.json
 # ==============================================================================
 
 set -e
+
+CONFIG_SCOPE="global"
+
+print_usage() {
+    echo "Usage: sh setup.sh [--workspace-only]"
+    echo ""
+    echo "Default: writes MCP config to ~/.config/Code/User/mcp.json"
+    echo "Option:  --workspace-only writes MCP config to <repo>/.vscode/mcp.json"
+}
+
+if [ "$#" -gt 1 ]; then
+    print_usage
+    exit 1
+fi
+
+if [ "$#" -eq 1 ]; then
+    case "$1" in
+        --workspace-only)
+            CONFIG_SCOPE="workspace"
+            ;;
+        -h|--help)
+            print_usage
+            exit 0
+            ;;
+        *)
+            echo ""
+            echo "ERROR: Unknown option: $1"
+            echo ""
+            print_usage
+            exit 1
+            ;;
+    esac
+fi
+
+read_masked_input() {
+    local prompt_text="$1"
+    local value=""
+    local char=""
+
+    printf "%s" "$prompt_text"
+
+    if [ ! -t 0 ]; then
+        IFS= read -r READ_MASKED_VALUE
+        return
+    fi
+
+    while IFS= read -r -s -n 1 char; do
+        if [[ "$char" == "" ]]; then
+            break
+        fi
+
+        if [[ "$char" == $'\177' || "$char" == $'\b' ]]; then
+            if [[ -n "$value" ]]; then
+                value="${value%?}"
+                printf '\b \b'
+            fi
+            continue
+        fi
+
+        value+="$char"
+        printf '*'
+    done
+
+    printf '\n'
+    READ_MASKED_VALUE="$value"
+}
 
 REPO_URL="https://github.com/Jonathan-Dekraker/sooperset-mcp-atlassian.git"
 REPO_NAME="sooperset-mcp-atlassian"
@@ -73,23 +148,40 @@ echo ""
 echo "Repository directory: $REPO_DIR"
 
 # ---------------------------------------------------------------------------
-# 3. Validate the global virtual environment
+# 3. Create/use a local virtual environment in the clone parent directory
 # ---------------------------------------------------------------------------
-VENV_DIR="/nfs/site/disks/drd_work/jdekraker/new_forked_sooperset_mcp_jira/jira_mcp_venv_3.12.3"
+PYTHON_BIN="/usr/intel/pkgs/python3/3.12.3/bin/python3"
+VENV_DIR="$CLONE_PARENT/jira_mcp_venv_3.12.3"
 
-if [ ! -d "$VENV_DIR" ]; then
+if [ ! -x "$PYTHON_BIN" ]; then
     echo ""
-    echo "ERROR: Virtual environment not found at:"
-    echo "  $VENV_DIR"
-    echo ""
-    echo "Please contact the repo maintainer to ensure the global venv is available."
+    echo "ERROR: Required Python executable not found or not executable:"
+    echo "  $PYTHON_BIN"
     exit 1
 fi
 
-UV_BIN="$VENV_DIR/bin/uv"
-if [ ! -f "$UV_BIN" ]; then
+if [ ! -d "$VENV_DIR" ]; then
     echo ""
-    echo "ERROR: 'uv' binary not found at:"
+    echo "Creating virtual environment:"
+    echo "  $VENV_DIR"
+    "$PYTHON_BIN" -m venv "$VENV_DIR"
+else
+    echo ""
+    echo "Virtual environment already exists:"
+    echo "  $VENV_DIR"
+fi
+
+UV_BIN="$VENV_DIR/bin/uv"
+
+if [ ! -x "$UV_BIN" ]; then
+    echo ""
+    echo "Installing uv into virtual environment..."
+    "$VENV_DIR/bin/python" -m pip install --upgrade pip uv
+fi
+
+if [ ! -x "$UV_BIN" ]; then
+    echo ""
+    echo "ERROR: 'uv' binary not found after installation attempt:"
     echo "  $UV_BIN"
     exit 1
 fi
@@ -123,8 +215,8 @@ echo "  To create one, visit:"
 echo "    https://jira.devtools.intel.com/secure/ViewProfile.jspa"
 echo "    -> Personal Access Tokens -> Create token"
 echo ""
-printf "  Enter your Jira PAT (or press Enter to skip and fill in later): "
-read JIRA_PAT
+read_masked_input "  Enter your Jira PAT (or press Enter to skip and fill in later): "
+JIRA_PAT="$READ_MASKED_VALUE"
 
 if [ -z "$JIRA_PAT" ]; then
     JIRA_PAT="<your personal access token>"
@@ -136,12 +228,19 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 6. Create .vscode directory and generate .vscode/mcp.json
+# 6. Generate mcp.json (global by default, workspace with --workspace-only)
 # ---------------------------------------------------------------------------
-VSCODE_DIR="$REPO_DIR/.vscode"
-mkdir -p "$VSCODE_DIR"
+if [ "$CONFIG_SCOPE" = "workspace" ]; then
+    MCP_DIR="$REPO_DIR/.vscode"
+    MCP_JSON="$MCP_DIR/mcp.json"
+    MCP_SCOPE_LABEL="workspace-level"
+else
+    MCP_DIR="$HOME/.config/Code/User"
+    MCP_JSON="$MCP_DIR/mcp.json"
+    MCP_SCOPE_LABEL="global user-level"
+fi
 
-MCP_JSON="$VSCODE_DIR/mcp.json"
+mkdir -p "$MCP_DIR"
 
 if [ -f "$MCP_JSON" ]; then
     BACKUP="$MCP_JSON.bak.$(date +%Y%m%d%H%M%S)"
@@ -174,6 +273,7 @@ ENDOFJSON
 
 echo ""
 echo "Created: $MCP_JSON"
+echo "Scope: $MCP_SCOPE_LABEL"
 
 # ---------------------------------------------------------------------------
 # 7. Done — print next steps
@@ -199,9 +299,9 @@ if [ "$PAT_SET" = "false" ]; then
     echo ""
     echo "  [2] Open the repo folder in VS Code:"
     echo "        code $REPO_DIR"
-    echo "      Then open .vscode/mcp.json and click the 'Start' button"
-    echo "      that appears above the wiki-jira-mcp server entry to start"
-    echo "      the MCP server."
+    echo "      Then open $MCP_JSON and click the 'Start' button that"
+    echo "      appears above the wiki-jira-mcp server entry to start the"
+    echo "      MCP server."
     echo ""
     echo "  [3] Open GitHub Copilot Chat, then click the tools icon"
     echo "      (fork/spoon icon) at the bottom of the chat input bar."
@@ -210,9 +310,9 @@ else
     echo "  [1] Open the repo folder in VS Code:"
     echo "        code $REPO_DIR"
     echo ""
-    echo "  [2] Open .vscode/mcp.json and click the 'Start' button that"
-    echo "      appears above the wiki-jira-mcp server entry to start"
-    echo "      the MCP server."
+    echo "  [2] Open $MCP_JSON and click the 'Start' button that appears"
+    echo "      above the wiki-jira-mcp server entry to start the MCP"
+    echo "      server."
     echo ""
     echo "  [3] Open GitHub Copilot Chat, then click the tools icon"
     echo "      (fork/spoon icon) at the bottom of the chat input bar."
